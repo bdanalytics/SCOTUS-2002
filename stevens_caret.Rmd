@@ -63,26 +63,39 @@ glb_split_newdata_condition <- "<col_name> <condition_operator> <value>"    # or
 glb_split_newdata_size_ratio <- 0.3               # > 0 & < 1
 glb_split_sample.seed <- 3000               # or any integer 
 
-# for random forests (method="rf") & classification, the prediction variable has to be a factor
-# for caret if the factor is based on numbers e.g (0/1 vs. "A"/"B"), caret prediction probabilities crashes
-glb_predct_var <- "Decision.fctr"           # or NULL
-glb_predct_var_name <- paste0(glb_predct_var, ".predict")
+glb_is_regression <- FALSE; glb_is_classification <- TRUE
+
+glb_rsp_var_raw <- "Reverse"
+
+# for classification, the response variable has to be a factor
+#   especially for random forests (method="rf")
+glb_rsp_var <- "Decision.fctr"
+
+# if the response factor is based on numbers e.g (0/1 vs. "A"/"B"), 
+#   caret predict(..., type="prob") crashes
+glb_map_rsp_raw_to_var <- function(raw) 
+    relevel(factor(ifelse(raw == 1, "R", "A")), as.factor(c("R", "A")), ref="A")
+
+glb_map_rsp_var_to_raw <- function(var) 
+    as.numeric(var) - 1
+
+if ((glb_rsp_var != glb_rsp_var_raw) & is.null(glb_map_rsp_raw_to_var))
+    stop("glb_map_rsp_raw_to_var function expected")
+
+glb_rsp_var_out <- paste0(glb_rsp_var, ".prediction")
 glb_id_vars <- c("Docket")                # or NULL
 
 glb_exclude_vars_as_features <- union(glb_id_vars, ".rnorm")     # or NULL                      
-# List chrs (convert into factors if it's a valid feature); num/int transformed  
+# List transformed vars  
 glb_exclude_vars_as_features <- union(glb_exclude_vars_as_features, 
-        c("Reverse", "Reverse.fctr", 
-          "Circuit", "Issue", "Petitioner", "Respondent", "LowerCourt")
-                                      )
+                                        c("Reverse", "Reverse.fctr"))
 # List feats that shd be excluded due to known causation by prediction variable
 glb_exclude_vars_as_features <- union(union(glb_exclude_vars_as_features, 
-                        paste(glb_predct_var_name, c("", ".proba"), sep="")),
-                                      c(NULL)) # or "<col_name>"
+                        paste(glb_rsp_var_out, c("", ".proba"), sep="")),
+                                    c("Docket.fctr", "Term")) # or "<col_name>"
 
 glb_impute_na_data <- FALSE            # or TRUE
 glb_mice_complete.seed <- 144               # or any integer
-glb_is_regression <- FALSE; glb_is_classification <- TRUE
 
 glb_sel_mdl <- glb_dmy_mdl <- NULL;
 glb_models_method_vctr <- c("glm", "rpart", "rf")
@@ -187,7 +200,7 @@ print(tail(glb_script_df, 2))
 ```{r cleanse_data, cache=FALSE}
 
 glb_script_df <- rbind(glb_script_df, 
-                   data.frame(chunk_label="inspect_explore_data", 
+                   data.frame(chunk_label="inspectORexplore.data", 
                               chunk_step_major=max(glb_script_df$chunk_step_major), 
                               chunk_step_minor=1,
                               elapsed=(proc.time() - glb_script_tm)["elapsed"]))
@@ -195,7 +208,7 @@ print(tail(glb_script_df, 2))
 ```
 
 ### Step ``r glb_script_df[nrow(glb_script_df), "chunk_step_major"]``.``r glb_script_df[nrow(glb_script_df), "chunk_step_minor"]``: inspect/explore data
-```{r inspect_explore_data_1, cache=FALSE}
+```{r inspectORexplore_data, cache=FALSE}
 #print(str(glb_entity_df))
 #View(glb_entity_df)
 
@@ -203,6 +216,20 @@ print(tail(glb_script_df, 2))
 # <col_name>:   <description>; <notes>
 
 # Create new features that help diagnostics
+#   Create factors of string variables
+str_vars <- sapply(1:length(names(glb_entity_df)), 
+    function(col) ifelse(class(glb_entity_df[, names(glb_entity_df)[col]]) == "character",
+                         names(glb_entity_df)[col], ""))
+str_vars <- setdiff(str_vars[str_vars != ""], glb_exclude_vars_as_features)
+warning("Creating factors of string variables:", paste0(str_vars, collapse=", "))
+glb_exclude_vars_as_features <- union(glb_exclude_vars_as_features, str_vars)
+for (var in str_vars) {
+    glb_entity_df[, paste0(var, ".fctr")] <- factor(glb_entity_df[, var], 
+                    as.factor(union(glb_entity_df[, var], glb_newent_df[, var])))
+    glb_newent_df[, paste0(var, ".fctr")] <- factor(glb_newent_df[, var], 
+                    as.factor(union(glb_entity_df[, var], glb_newent_df[, var])))
+}
+
 #   Convert factors to dummy variables
 #   Build splines   require(splines); bsBasis <- bs(training$age, df=3)
 
@@ -212,24 +239,6 @@ add_new_diag_feats <- function(obs_df, obs_twin_df) {
     obs_df <- mutate(obs_df,
 #         <col_name>.NA=is.na(<col_name>),
 
-        Reverse.fctr=relevel(factor(Reverse, 
-                    as.factor(union(obs_df$Reverse, obs_twin_df$Reverse))),
-                    ref="0"),
-        Decision.fctr=relevel(factor(ifelse(Reverse == 1, "R", "A")), 
-                              as.factor(c("R", "A")),
-                              ref="A"),
-        Circuit.fctr=factor(Circuit, 
-                    as.factor(union(obs_df$Circuit, obs_twin_df$Circuit))), 
-        Issue.fctr=factor(Issue, 
-                    as.factor(union(obs_df$Issue, obs_twin_df$Issue))), 
-        Petitioner.fctr=factor(Petitioner, 
-                    as.factor(union(obs_df$Petitioner, obs_twin_df$Petitioner))), 
-        Respondent.fctr=factor(Respondent, 
-                    as.factor(union(obs_df$Respondent, obs_twin_df$Respondent))), 
-        LowerCourt.fctr=factor(LowerCourt, 
-                    as.factor(union(obs_df$LowerCourt, obs_twin_df$LowerCourt))), 
-#         <col_name>.fctr=factor(<col_name>, 
-#                     as.factor(union(obs_df$<col_name>, obs_twin_df$<col_name>))), 
 #         <col_name>.fctr=relevel(factor(<col_name>, 
 #                     as.factor(union(obs_df$<col_name>, obs_twin_df$<col_name>))),
 #                                   "<ref_val>"), 
@@ -267,9 +276,21 @@ glb_entity_df <- add_new_diag_feats(glb_entity_df, glb_newent_df)
 glb_newent_df <- add_new_diag_feats(glb_newent_df, glb_entity_df)
 
 # Histogram of predictor in glb_entity_df & glb_newent_df
-print(myplot_histogram(glb_entity_df, glb_predct_var))
-#pairs(subset(glb_entity_df, select=-c(col_symbol)))
+print(myplot_histogram(glb_entity_df, glb_rsp_var_raw))
 
+# Check for duplicates in glb_id_vars
+id_vars_dups_df <- subset(id_vars_df <- mycreate_tbl_df(
+    rbind(glb_entity_df[, glb_id_vars, FALSE], glb_newent_df[, glb_id_vars, FALSE]),
+        glb_id_vars), .freq > 1)
+if (nrow(id_vars_dups_df) > 0) {
+    warning("Duplicates found in glb_id_vars data:", nrow(id_vars_dups_df))
+    myprint_df(id_vars_dups_df)
+} else {
+    # glb_id_vars are unique across obs in both glb_<>_df
+    glb_exclude_vars_as_features <- union(glb_exclude_vars_as_features, glb_id_vars)
+}
+
+#pairs(subset(glb_entity_df, select=-c(col_symbol)))
 # Check for glb_newent_df & glb_entity_df features range mismatches
 
 # Other diagnostics:
@@ -333,7 +354,7 @@ glb_impute_missing_data <- function(entity_df, newent_df) {
         union_df <- rbind(mutate(entity_df, .src = "entity"),
                           mutate(newent_df, .src = "newent"))
         union_imputed_df <- union_df[, setdiff(setdiff(names(entity_df), 
-                                                       glb_predct_var), 
+                                                       glb_rsp_var), 
                                                glb_exclude_vars_as_features)]
         print(summary(union_imputed_df))
     
@@ -403,6 +424,18 @@ print(tail(glb_script_df, 2))
 # glb_newent_df$<col_name>.fctr <- factor(glb_newent_df$<col_name>, 
 #                     as.factor(union(glb_entity_df$<col_name>, glb_newent_df$<col_name>)))
 
+if (!is.null(glb_map_rsp_raw_to_var)) {
+    glb_entity_df[, glb_rsp_var] <- 
+        glb_map_rsp_raw_to_var(glb_entity_df[, glb_rsp_var_raw])
+    mycheck_map_results(mapd_df=glb_entity_df, 
+                        from_col_name=glb_rsp_var_raw, to_col_name=glb_rsp_var)
+        
+    glb_newent_df[, glb_rsp_var] <- 
+        glb_map_rsp_raw_to_var(glb_newent_df[, glb_rsp_var_raw])
+    mycheck_map_results(mapd_df=glb_newent_df, 
+                        from_col_name=glb_rsp_var_raw, to_col_name=glb_rsp_var)    
+}
+
 glb_script_df <- rbind(glb_script_df, 
                    data.frame(chunk_label="extract_features", 
                               chunk_step_major=max(glb_script_df$chunk_step_major)+1, 
@@ -454,9 +487,9 @@ print(tail(glb_script_df, 2))
 ## Step ``r glb_script_df[nrow(glb_script_df), "chunk_step_major"]``: select features
 ```{r select_features, cache=FALSE}
 print(glb_feats_df <- 
-    myselect_features(lcl_entity_df=glb_entity_df, 
-                      lcl_exclude_vars_as_features=glb_exclude_vars_as_features, 
-                      lcl_predct_var=glb_predct_var))
+    myselect_features( entity_df=glb_entity_df, 
+                       exclude_vars_as_features=glb_exclude_vars_as_features, 
+                       rsp_var=glb_rsp_var))
 
 glb_script_df <- rbind(glb_script_df, 
     data.frame(chunk_label="remove_correlated_features", 
@@ -469,7 +502,7 @@ print(tail(glb_script_df, 2))
 ### Step ``r glb_script_df[nrow(glb_script_df), "chunk_step_major"]``.``r glb_script_df[nrow(glb_script_df), "chunk_step_minor"]``: remove correlated features
 ```{r remove_correlated_features, cache=FALSE}
 print(glb_feats_df <- orderBy(~-cor.y, merge(glb_feats_df, 
-          mydelete_cor_features(glb_feats_df, glb_entity_df, glb_predct_var, 
+          mydelete_cor_features(glb_feats_df, glb_entity_df, glb_rsp_var, 
                                 glb_exclude_vars_as_features), 
           all.x=TRUE)))
 
@@ -497,19 +530,19 @@ if (glb_is_classification) myrun_mdl_fn <- myrun_mdl_classification
 # Add dummy model - random variable
 #   Potential Enhancements:
 #       For classifiers, it shd generate proba/outcomes that mimics the freq
-#           distribution of glb_predct_var values; Right now it always generates
+#           distribution of glb_rsp_var values; Right now it always generates
 #           0 (most frequent ?)
 ret_lst <- myrun_mdl_fn(indep_vars_vctr=".rnorm",
-                        lcl_predct_var=glb_predct_var, 
-                        lcl_predct_var_name=glb_predct_var_name,
+                         rsp_var=glb_rsp_var, 
+                         rsp_var_out=glb_rsp_var_out,
                         fit_df=glb_entity_df, OOB_df=glb_newent_df,
                         method="glm")
 glb_dmy_mdl <- ret_lst[["model"]]
 
 # Highest cor.y
 ret_lst <- myrun_mdl_fn(indep_vars_vctr=max_cor_y_x_var,
-                        lcl_predct_var=glb_predct_var, 
-                        lcl_predct_var_name=glb_predct_var_name,
+                         rsp_var=glb_rsp_var, 
+                         rsp_var_out=glb_rsp_var_out,
                         fit_df=glb_entity_df, OOB_df=glb_newent_df,
                         method="glm")
 
@@ -519,21 +552,14 @@ if (nrow(subset(glb_feats_df, is.na(cor.low))) > 0)
     ret_lst <- myrun_mdl_fn(indep_vars_vctr=c(max_cor_y_x_var, 
         paste(max_cor_y_x_var, 
               subset(glb_feats_df, is.na(cor.low))[, "id"], sep=":")),
-                        glb_predct_var, glb_predct_var_name,
+                        glb_rsp_var, glb_rsp_var_out,
                             fit_df=glb_entity_df, OOB_df=glb_newent_df,
                         method="glm")    
 
 # Low correlated X
 ret_lst <- myrun_mdl_fn(indep_vars_vctr=subset(glb_feats_df, 
                                                cor.low == 1)[, "id"],
-                        glb_predct_var, glb_predct_var_name,
-                        fit_df=glb_entity_df, OOB_df=glb_newent_df,
-                        method="glm")
-
-# All X that is not user excluded
-ret_lst <- myrun_mdl_fn(indep_vars_vctr=setdiff(names(glb_entity_df), 
-    union(glb_predct_var, glb_exclude_vars_as_features)),
-                        glb_predct_var, glb_predct_var_name,
+                        glb_rsp_var, glb_rsp_var_out,
                         fit_df=glb_entity_df, OOB_df=glb_newent_df,
                         method="glm")
 
@@ -541,10 +567,14 @@ ret_lst <- myrun_mdl_fn(indep_vars_vctr=setdiff(names(glb_entity_df),
 for (method in glb_models_method_vctr) {
     #print(sprintf("iterating over method:%s", method))
     
-    # easier to exclude features
+    # All X that is not user excluded
     indep_vars_vctr <- setdiff(names(glb_entity_df), 
-        union(union(glb_predct_var, glb_exclude_vars_as_features), 
-              c("Term")))
+        union(glb_rsp_var, glb_exclude_vars_as_features))
+    
+    # easier to exclude features
+#     indep_vars_vctr <- setdiff(names(glb_entity_df), 
+#         union(union(glb_rsp_var, glb_exclude_vars_as_features), 
+#               c("<feat1_name>", "<feat2_name>")))
     
     # easier to include features
 #     indep_vars_vctr <- c("<feat1_name>", "<feat2_name>")
@@ -552,7 +582,7 @@ for (method in glb_models_method_vctr) {
     # User specified bivariate models
 #     indep_vars_vctr_lst <- list()
 #     for (feat in setdiff(names(glb_entity_df), 
-#                          union(glb_predct_var, glb_exclude_vars_as_features)))
+#                          union(glb_rsp_var, glb_exclude_vars_as_features)))
 #         indep_vars_vctr_lst[["feat"]] <- feat
 
     # User specified combinatorial models
@@ -565,9 +595,12 @@ for (method in glb_models_method_vctr) {
 
     set.seed(200)
     ret_lst <- myrun_mdl_fn(indep_vars_vctr=indep_vars_vctr,
-                            glb_predct_var, glb_predct_var_name,
-                            fit_df=glb_entity_df, OOB_df=glb_newent_df,
-                            method=method)
+                             rsp_var=glb_rsp_var, 
+                             rsp_var_out=glb_rsp_var_out,
+                            fit_df=glb_entity_df, 
+                            OOB_df=glb_newent_df,
+                            method=method, 
+                             tune_models_df=glb_tune_models_df)
 #     glb_<id>_mdl <- ret_lst[["model"]]
 }
 
@@ -615,14 +648,14 @@ print(tail(glb_script_df, 2))
 
 ## Step ``r glb_script_df[nrow(glb_script_df), "chunk_step_major"]``: fit.data.training.all
 ```{r fit.data.training.all_0, cache=FALSE}
-print(mdl_feats_df <- myextract_mdl_feats(lcl_sel_mdl=glb_sel_mdl, 
-                                          lcl_entity_df=glb_entity_df))
+print(mdl_feats_df <- myextract_mdl_feats( sel_mdl=glb_sel_mdl, 
+                                           entity_df=glb_entity_df))
 ret_lst <- myrun_mdl_fn(indep_vars_vctr=mdl_feats_df$id,
-                        lcl_predct_var=glb_predct_var, 
-                        lcl_predct_var_name=glb_predct_var_name, 
+                         rsp_var=glb_rsp_var, 
+                         rsp_var_out=glb_rsp_var_out, 
                         fit_df=glb_entity_df,
                         method=glb_sel_mdl$method,
-                        lcl_tune_models_df=glb_tune_models_df)
+                         tune_models_df=glb_tune_models_df)
 glb_sel_mdl <- ret_lst[["model"]]; #glb_sel_mdl_fn <- ret_lst[["model_fn"]]        
 # print(glb_models_df[nrow(glb_models_df), ])
 
@@ -636,31 +669,31 @@ print(tail(glb_script_df, 2))
 
 ```{r fit.data.training.all_1, cache=FALSE}
 if (glb_is_regression) {
-    glb_entity_df[, glb_predct_var_name] <- predict(glb_sel_mdl, newdata=glb_entity_df)
-    print(myplot_scatter(glb_entity_df, glb_predct_var, glb_predct_var_name, 
+    glb_entity_df[, glb_rsp_var_out] <- predict(glb_sel_mdl, newdata=glb_entity_df)
+    print(myplot_scatter(glb_entity_df, glb_rsp_var, glb_rsp_var_out, 
                          smooth=TRUE))
-    glb_entity_df[, paste0(glb_predct_var_name, ".err")] <- 
-        abs(glb_entity_df[, glb_predct_var_name] - glb_entity_df[, glb_predct_var])
-    print(head(orderBy(reformulate(c("-", paste0(glb_predct_var_name, ".err"))), 
+    glb_entity_df[, paste0(glb_rsp_var_out, ".err")] <- 
+        abs(glb_entity_df[, glb_rsp_var_out] - glb_entity_df[, glb_rsp_var])
+    print(head(orderBy(reformulate(c("-", paste0(glb_rsp_var_out, ".err"))), 
                        glb_entity_df)))                             
 }    
 
 if (glb_is_classification) {
             if (any(class(glb_sel_mdl) %in% c("train"))) {
-        glb_entity_df[, paste0(glb_predct_var_name, ".proba")] <- 
+        glb_entity_df[, paste0(glb_rsp_var_out, ".proba")] <- 
             predict(glb_sel_mdl, newdata=glb_entity_df, type="prob")[, 2]
     } else  if (any(class(glb_sel_mdl) %in% c("rpart", "randomForest"))) {
-        glb_entity_df[, paste0(glb_predct_var_name, ".proba")] <- 
+        glb_entity_df[, paste0(glb_rsp_var_out, ".proba")] <- 
             predict(glb_sel_mdl, newdata=glb_entity_df, type="prob")[, 2]
     } else  if (class(glb_sel_mdl) == "glm") {
         stop("not implemented yet")
-        glb_entity_df[, paste0(glb_predct_var_name, ".proba")] <- 
+        glb_entity_df[, paste0(glb_rsp_var_out, ".proba")] <- 
             predict(glb_sel_mdl, newdata=glb_entity_df, type="response")
     } else  stop("not implemented yet")   
 
     require(ROCR)
-    ROCRpred <- prediction(glb_entity_df[, paste0(glb_predct_var_name, ".proba")],
-                           glb_entity_df[, glb_predct_var])
+    ROCRpred <- prediction(glb_entity_df[, paste0(glb_rsp_var_out, ".proba")],
+                           glb_entity_df[, glb_rsp_var])
     ROCRperf <- performance(ROCRpred, "tpr", "fpr")
     plot(ROCRperf, colorize=TRUE, print.cutoffs.at=seq(0, 1, 0.1), text.adj=c(-0.2,1.7))
     
@@ -668,8 +701,8 @@ if (glb_is_classification) {
     thresholds_df$f.score <- sapply(1:nrow(thresholds_df), function(row_ix) 
         mycompute_classifier_f.score(mdl=glb_sel_mdl, obs_df=glb_entity_df, 
                                      proba_threshold=thresholds_df[row_ix, "threshold"], 
-                                     lcl_predct_var=glb_predct_var, 
-                                     lcl_predct_var_name=glb_predct_var_name))
+                                      rsp_var=glb_rsp_var, 
+                                      rsp_var_out=glb_rsp_var_out))
     print(thresholds_df)
     print(myplot_line(thresholds_df, "threshold", "f.score"))
     
@@ -684,19 +717,19 @@ if (glb_is_classification) {
                       glb_clf_proba_threshold))
     }
 
-    if ((class(glb_entity_df[, glb_predct_var]) != "factor") | 
-    	(length(levels(glb_entity_df[, glb_predct_var])) != 2))
-		stop("expecting a factor with two levels:", glb_predct_var)
-	glb_entity_df[, glb_predct_var_name] <- 
-		factor(levels(glb_entity_df[, glb_predct_var])[
-			(glb_entity_df[, paste0(glb_predct_var_name, ".proba")] >= 
+    if ((class(glb_entity_df[, glb_rsp_var]) != "factor") | 
+    	(length(levels(glb_entity_df[, glb_rsp_var])) != 2))
+		stop("expecting a factor with two levels:", glb_rsp_var)
+	glb_entity_df[, glb_rsp_var_out] <- 
+		factor(levels(glb_entity_df[, glb_rsp_var])[
+			(glb_entity_df[, paste0(glb_rsp_var_out, ".proba")] >= 
 				glb_clf_proba_threshold) * 1 + 1])
     
-    print(mycreate_xtab(glb_entity_df, c(glb_predct_var, glb_predct_var_name)))
+    print(mycreate_xtab(glb_entity_df, c(glb_rsp_var, glb_rsp_var_out)))
     print(sprintf("f.score=%0.4f", 
         mycompute_classifier_f.score(glb_sel_mdl, glb_entity_df, 
                                      glb_clf_proba_threshold, 
-                                     glb_predct_var, glb_predct_var_name)))    
+                                     glb_rsp_var, glb_rsp_var_out)))    
 }    
 
 print(glb_feats_df <- mymerge_feats_importance(glb_feats_df, glb_sel_mdl, glb_entity_df))
@@ -705,7 +738,7 @@ print(glb_feats_df <- mymerge_feats_importance(glb_feats_df, glb_sel_mdl, glb_en
 glb_analytics_diag_plots <- function(obs_df) {
     for (var in subset(glb_feats_df, !is.na(importance))$id) {
         plot_df <- melt(obs_df, id.vars=var, 
-                        measure.vars=c(glb_predct_var, glb_predct_var_name))
+                        measure.vars=c(glb_rsp_var, glb_rsp_var_out))
 #         if (var == "<feat_name>") print(myplot_scatter(plot_df, var, "value", 
 #                                              facet_colcol_name="variable") + 
 #                       geom_vline(xintercept=<divider_val>, linetype="dotted")) else     
@@ -718,7 +751,7 @@ glb_analytics_diag_plots <- function(obs_df) {
         print(myplot_prediction_regression(obs_df, 
                     ifelse(nrow(plot_vars_df) > 1, plot_vars_df$id[2], ".rownames"), 
                                            plot_vars_df$id[1],
-                    glb_predct_var, glb_predct_var_name)
+                    glb_rsp_var, glb_rsp_var_out)
 #               + facet_wrap(reformulate(plot_vars_df$id[2])) # if [1,2] is a factor                                                         
 #               + geom_point(aes_string(color="<col_name>.fctr")) #  to color the plot
               )
@@ -731,9 +764,9 @@ glb_analytics_diag_plots <- function(obs_df) {
                 feat_x=ifelse(nrow(plot_vars_df) > 1, plot_vars_df$id[2], 
                               ".rownames"),
                                                feat_y=plot_vars_df$id[1],
-                    lcl_predct_var=glb_predct_var, 
-                    lcl_predct_var_name=glb_predct_var_name, 
-                    lcl_id_vars=glb_id_vars)
+                     rsp_var=glb_rsp_var, 
+                     rsp_var_out=glb_rsp_var_out, 
+                     id_vars=glb_id_vars)
 #               + geom_hline(yintercept=<divider_val>, linetype = "dotted")
                 )
     }    
@@ -754,77 +787,77 @@ print(tail(glb_script_df, 2))
 ## Step ``r glb_script_df[nrow(glb_script_df), "chunk_step_major"]``: predict data.new
 ```{r predict.data.new, cache=FALSE}
 if (glb_is_regression)
-    glb_newent_df[, glb_predct_var_name] <- predict(glb_sel_mdl, 
+    glb_newent_df[, glb_rsp_var_out] <- predict(glb_sel_mdl, 
                                         newdata=glb_newent_df, type="response")
 
 if (glb_is_classification) {
     # Compute selected model predictions
             if (any(class(glb_sel_mdl) %in% c("train"))) {
-        glb_newent_df[, paste0(glb_predct_var_name, ".proba")] <- 
+        glb_newent_df[, paste0(glb_rsp_var_out, ".proba")] <- 
             predict(glb_sel_mdl, newdata=glb_newent_df, type="prob")[, 2]
     } else  if (any(class(glb_sel_mdl) %in% c("rpart", "randomForest"))) {
-        glb_newent_df[, paste0(glb_predct_var_name, ".proba")] <- 
+        glb_newent_df[, paste0(glb_rsp_var_out, ".proba")] <- 
             predict(glb_sel_mdl, newdata=glb_newent_df, type="prob")[, 2]
     } else  if (class(glb_sel_mdl) == "glm") {
         stop("not implemented yet")
-        glb_newent_df[, paste0(glb_predct_var_name, ".proba")] <- 
+        glb_newent_df[, paste0(glb_rsp_var_out, ".proba")] <- 
             predict(glb_sel_mdl, newdata=glb_newent_df, type="response")
     } else  stop("not implemented yet")   
 
-    if ((class(glb_newent_df[, glb_predct_var]) != "factor") | 
-		(length(levels(glb_newent_df[, glb_predct_var])) != 2))
-		stop("expecting a factor with two levels:", glb_predct_var)
-	glb_newent_df[, glb_predct_var_name] <- 
-		factor(levels(glb_newent_df[, glb_predct_var])[
-			(glb_newent_df[, paste0(glb_predct_var_name, ".proba")] >= 
+    if ((class(glb_newent_df[, glb_rsp_var]) != "factor") | 
+		(length(levels(glb_newent_df[, glb_rsp_var])) != 2))
+		stop("expecting a factor with two levels:", glb_rsp_var)
+	glb_newent_df[, glb_rsp_var_out] <- 
+		factor(levels(glb_newent_df[, glb_rsp_var])[
+			(glb_newent_df[, paste0(glb_rsp_var_out, ".proba")] >= 
 				glb_clf_proba_threshold) * 1 + 1])
     
     # Compute dummy model predictions
-    glb_newent_df[, paste0(glb_predct_var, ".preddmy.proba")] <- 
+    glb_newent_df[, paste0(glb_rsp_var, ".preddmy.proba")] <- 
         predict(glb_dmy_mdl, newdata=glb_newent_df, type="prob")[, 2]
-    if ((class(glb_newent_df[, glb_predct_var]) != "factor") | 
-    	(length(levels(glb_newent_df[, glb_predct_var])) != 2))
-		stop("expecting a factor with two levels:", glb_predct_var)
-	glb_newent_df[, paste0(glb_predct_var, ".preddmy")] <- 
-		factor(levels(glb_newent_df[, glb_predct_var])[
-			(glb_newent_df[, paste0(glb_predct_var, ".preddmy.proba")] >= 
+    if ((class(glb_newent_df[, glb_rsp_var]) != "factor") | 
+    	(length(levels(glb_newent_df[, glb_rsp_var])) != 2))
+		stop("expecting a factor with two levels:", glb_rsp_var)
+	glb_newent_df[, paste0(glb_rsp_var, ".preddmy")] <- 
+		factor(levels(glb_newent_df[, glb_rsp_var])[
+			(glb_newent_df[, paste0(glb_rsp_var, ".preddmy.proba")] >= 
 				glb_clf_proba_threshold) * 1 + 1])
 
 }
     
-myprint_df(glb_newent_df[, c(glb_id_vars, glb_predct_var, glb_predct_var_name)])
+myprint_df(glb_newent_df[, c(glb_id_vars, glb_rsp_var, glb_rsp_var_out)])
 
 if (glb_is_regression) {
     print(sprintf("Total SSE: %0.4f", 
-                  sum((glb_newent_df[, glb_predct_var_name] - 
-                        glb_newent_df[, glb_predct_var]) ^ 2)))
+                  sum((glb_newent_df[, glb_rsp_var_out] - 
+                        glb_newent_df[, glb_rsp_var]) ^ 2)))
     print(sprintf("RMSE: %0.4f", 
-                  (sum((glb_newent_df[, glb_predct_var_name] - 
-                        glb_newent_df[, glb_predct_var]) ^ 2) / nrow(glb_newent_df)) ^ 0.5))                        
-    print(myplot_scatter(glb_newent_df, glb_predct_var, glb_predct_var_name, 
+                  (sum((glb_newent_df[, glb_rsp_var_out] - 
+                        glb_newent_df[, glb_rsp_var]) ^ 2) / nrow(glb_newent_df)) ^ 0.5))                        
+    print(myplot_scatter(glb_newent_df, glb_rsp_var, glb_rsp_var_out, 
                          smooth=TRUE))
                          
-    glb_newent_df[, paste0(glb_predct_var_name, ".err")] <- 
-        abs(glb_newent_df[, glb_predct_var_name] - glb_newent_df[, glb_predct_var])
-    print(head(orderBy(reformulate(c("-", paste0(glb_predct_var_name, ".err"))), 
+    glb_newent_df[, paste0(glb_rsp_var_out, ".err")] <- 
+        abs(glb_newent_df[, glb_rsp_var_out] - glb_newent_df[, glb_rsp_var])
+    print(head(orderBy(reformulate(c("-", paste0(glb_rsp_var_out, ".err"))), 
                        glb_newent_df)))                                                      
 
 #     glb_newent_df[, "<Output Pred variable>"] <- func(glb_newent_df[, glb_pred_var_name])                         
 }                         
 
 if (glb_is_classification) {
-    ROCRpred <- prediction(glb_newent_df[, paste0(glb_predct_var_name, ".proba")],
-                           glb_newent_df[, glb_predct_var])
+    ROCRpred <- prediction(glb_newent_df[, paste0(glb_rsp_var_out, ".proba")],
+                           glb_newent_df[, glb_rsp_var])
     print(sprintf("auc=%0.4f", auc <- as.numeric(performance(ROCRpred, "auc")@y.values)))   
     
     print(sprintf("probability threshold=%0.4f", glb_clf_proba_threshold))
     print(newent_conf_df <- mycreate_xtab(glb_newent_df, 
-                                        c(glb_predct_var, glb_predct_var_name)))
+                                        c(glb_rsp_var, glb_rsp_var_out)))
     print(sprintf("f.score.sel=%0.4f", 
         mycompute_classifier_f.score(mdl=glb_sel_mdl, obs_df=glb_newent_df, 
                                      proba_threshold=glb_clf_proba_threshold, 
-                                     lcl_predct_var=glb_predct_var, 
-                                     lcl_predct_var_name=glb_predct_var_name)))
+                                      rsp_var=glb_rsp_var, 
+                                      rsp_var_out=glb_rsp_var_out)))
     print(sprintf("sensitivity=%0.4f", newent_conf_df[2, 3] / 
                       (newent_conf_df[2, 3] + newent_conf_df[2, 2])))
     print(sprintf("specificity=%0.4f", newent_conf_df[1, 2] / 
@@ -833,12 +866,12 @@ if (glb_is_classification) {
                       (newent_conf_df[1, 2] + newent_conf_df[2, 3] + 
                        newent_conf_df[1, 3] + newent_conf_df[2, 2])))
     
-    print(mycreate_xtab(glb_newent_df, c(glb_predct_var, paste0(glb_predct_var, ".preddmy"))))
+    print(mycreate_xtab(glb_newent_df, c(glb_rsp_var, paste0(glb_rsp_var, ".preddmy"))))
     print(sprintf("f.score.dmy=%0.4f", 
         mycompute_classifier_f.score(mdl=glb_dmy_mdl, obs_df=glb_newent_df, 
                                      proba_threshold=glb_clf_proba_threshold, 
-                                     lcl_predct_var=glb_predct_var, 
-                                     lcl_predct_var_name=paste0(glb_predct_var, ".preddmy"))))
+                                      rsp_var=glb_rsp_var, 
+                                      rsp_var_out=paste0(glb_rsp_var, ".preddmy"))))
 }    
     
 glb_analytics_diag_plots(glb_newent_df)
